@@ -1,11 +1,11 @@
-use std::{error::Error, vec::Vec};
-
-use crate::engine::Options;
+use std::{path::Path, vec::Vec};
+use anyhow;
+use crate::Options;
 
 use super::engine::Bitcask;
 
 pub struct BitcaskHandler {
-    bitcask_engine: Bitcask,
+    pub(crate) bitcask_engine: Bitcask,
 }
 
 impl BitcaskHandler {
@@ -42,12 +42,12 @@ impl BitcaskHandler {
     ///
     /// // Open with write access and sync on every write
     /// let handler = BitcaskHandler::open(
-    ///     String::from("/tmp/bitcask"),
+    ///     &Path::new("/tmp/bitcask"),
     ///     Some(vec![String::from("read_write"), String::from("sync_on_put")])
     /// ).unwrap();
     /// ```
-    pub fn open(directory_name: String, options: Option<Options>) -> Result<Self, Box<dyn Error>> {
-        Bitcask::open(directory_name, options)
+    pub fn open(directory: &Path, options: Option<Options>) -> Result<Self, anyhow::Error> {
+        Bitcask::open(directory, options)
     }
 
     /// Retrieves a value by key from the Bitcask datastore.
@@ -79,7 +79,7 @@ impl BitcaskHandler {
     /// let value = db.get(b"user:1").unwrap();
     /// println!("Value: {:?}", value);
     /// ```
-    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, Box<dyn Error>>{
+    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, anyhow::Error>{
         self.bitcask_engine.get(key)
     }
 
@@ -108,7 +108,7 @@ impl BitcaskHandler {
     /// let db = BitcaskHandler::open("/tmp/bitcask", Some(vec!["read_write"])).unwrap();
     /// db.put(b"user:1", b"Saif").unwrap();
     /// ```
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), anyhow::Error> {
         self.bitcask_engine.put(key, value)
     }
 
@@ -140,7 +140,7 @@ impl BitcaskHandler {
     /// db.delete(b"user:1").unwrap();
     /// assert!(db.get(b"user:1").is_err());
     /// ```
-    pub fn delete(&self, key: &[u8]) -> Result<(), Box<dyn Error>> {
+    pub fn delete(&self, key: &[u8]) -> Result<(), anyhow::Error> {
         self.bitcask_engine.delete(key)
     }
 
@@ -174,7 +174,7 @@ impl BitcaskHandler {
     ///     println!("Key: {:?}", String::from_utf8_lossy(&k));
     /// }
     /// ```
-    pub fn list_keys(&self) -> Result<Vec<Vec<u8>>, Box<dyn Error>> {
+    pub fn list_keys(&self) -> Result<Vec<Vec<u8>>, anyhow::Error> {
         self.bitcask_engine.list_keys()
     }
 
@@ -204,7 +204,7 @@ impl BitcaskHandler {
     /// let handler = BitcaskHandler::open("data").unwrap();
     /// handler.merge().unwrap();
     /// ```
-    pub fn merge(&self) -> Result<(), Box<dyn Error>> {
+    pub fn merge(&self) -> Result<(), anyhow::Error> {
         self.bitcask_engine.merge()
     }
 
@@ -226,7 +226,7 @@ impl BitcaskHandler {
     /// let handler = BitcaskHandler::open("data", None).unwrap();
     /// handler.sync().unwrap();
     /// ```
-    pub fn sync(&self) -> Result<(), Box<dyn Error>> {
+    pub fn sync(&self) -> Result<(), anyhow::Error> {
         self.bitcask_engine.sync()
     }
 
@@ -248,7 +248,7 @@ impl BitcaskHandler {
     /// let handler = BitcaskHandler::open("data", None).unwrap();
     /// handler.close().unwrap();
     /// ```
-    pub fn close(&self) -> Result<(), Box<dyn Error>> {
+    pub fn close(&self) -> Result<(), anyhow::Error> {
         self.bitcask_engine.close()
     }
 }
