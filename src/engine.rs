@@ -3,13 +3,13 @@ use bincode::{Decode, Encode, config, decode_from_std_read};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crc32fast::Hasher;
 use crate::{Options, files::WorkingFile};
+use crc32fast::Hasher;
 
 use super::BitcaskHandler;
 
@@ -102,6 +102,7 @@ impl Bitcask {
          * Build the Hashmap from existing data and hint files when opening existing bitcask directory
          */
         let options = options.unwrap_or(Options::default());
+        let key_dir = Self::rebuild_key_dir_map(&directory)?;
 
         let (lock_file, working_file, working_file_id) = if options.read_write {
             let lock_file = Some(Self::try_acquire_write_lock(directory)?);
@@ -124,7 +125,7 @@ impl Bitcask {
                 lock_file,
                 working_file,
                 working_file_id,
-                HashMap::new(),
+                key_dir,
                 options,
             ),
         };
@@ -145,6 +146,70 @@ impl Bitcask {
             .try_lock()
             .expect("Bitcask directory is already open for writing by another process");
         Ok(lock_file)
+    }
+
+    fn rebuild_key_dir_map(directory: &Path) -> Result<HashMap<Vec<u8>, DirEntry>, anyhow::Error> {
+        // TODO: Handle reading from hint files(when added support) if exists, to build the map fast.
+        let mut key_dir: HashMap<Vec<u8>, DirEntry> = HashMap::new();
+        let data_files_paths = directory.read_dir()?.filter_map(|entry| {
+            entry
+                .ok()
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .unwrap_or_default()
+                        .contains("working_file")
+                })
+                .map(|x| x.path())
+        });
+
+        for file_path in data_files_paths {
+            let file = File::open(&file_path).context(format!(
+                "Error Opening data file with path{}",
+                file_path.to_str().unwrap()
+            ))?;
+            let mut reader = BufReader::with_capacity(64 * 1024, file); // 64 KB
+
+            loop {
+                let disk_entry_pos: usize = reader.stream_position()?.try_into().unwrap();
+                let disk_entry: Entry =
+                    match decode_from_std_read::<Entry, _, _>(&mut reader, config::standard()) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            if e.to_string().contains("UnexpectedEof") {
+                                break; // reached EOF
+                            } else {
+                                return Err(e.into()); // real error
+                            }
+                        }
+                    };
+                let file_name = file_path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap_or_default()
+                    .to_string();
+
+                match key_dir.get(&disk_entry.key) {
+                    Some(val) => {
+                        if disk_entry.timestamp > val.timestamp {
+                            key_dir.insert(
+                                disk_entry.key,
+                                DirEntry::new(file_name, disk_entry_pos, disk_entry.timestamp),
+                            );
+                        }
+                    }
+                    _ => {
+                        key_dir.insert(
+                            disk_entry.key,
+                            DirEntry::new(file_name, disk_entry_pos, disk_entry.timestamp),
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(key_dir)
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, anyhow::Error> {
