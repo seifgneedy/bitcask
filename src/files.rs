@@ -20,6 +20,7 @@ impl WorkingFile {
         let file_path = directory.join(format!("working_file_{id}"));
         let file = Self {
             file: OpenOptions::new()
+                .read(true)
                 .append(true)
                 .create_new(true)
                 .open(&file_path)
@@ -61,5 +62,9 @@ impl WorkingFile {
             .unwrap()
             .to_string_lossy()
             .into_owned();
+    }
+
+    pub fn get_mut_file_ref(&mut self) -> &mut File {
+        return &mut self.file;
     }
 }

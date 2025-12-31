@@ -79,7 +79,7 @@ impl BitcaskHandler {
     /// let value = db.get(b"user:1").unwrap();
     /// println!("Value: {:?}", value);
     /// ```
-    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, anyhow::Error>{
+    pub fn get(&mut self, key: &[u8]) -> Result<Vec<u8>, anyhow::Error>{
         self.bitcask_engine.get(key)
     }
 
