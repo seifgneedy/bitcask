@@ -3,7 +3,7 @@ use bincode::{Decode, Encode, config, decode_from_std_read};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{BufReader, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,6 +22,8 @@ pub struct Bitcask {
     key_dir: HashMap<Vec<u8>, DirEntry>,
     options: Options,
     // IDEA: keep files opened to avoid opening for every request in a hashmap? with
+    // TODO: study the feasibility of having mmap instead. That will limit our implementation on 64-bit arch?
+    files_pool: HashMap<String, File>,
 }
 
 impl Bitcask {
@@ -32,6 +34,7 @@ impl Bitcask {
         working_file_id: Option<usize>,
         key_dir: HashMap<Vec<u8>, DirEntry>,
         options: Options,
+        files_pool: HashMap<String, File>,
     ) -> Self {
         Self {
             directory: directory.to_path_buf(),
@@ -40,6 +43,7 @@ impl Bitcask {
             working_file_id,
             key_dir,
             options,
+            files_pool,
         }
     }
 }
@@ -102,7 +106,7 @@ impl Bitcask {
          * Build the Hashmap from existing data and hint files when opening existing bitcask directory
          */
         let options = options.unwrap_or(Options::default());
-        let key_dir = Self::rebuild_key_dir_map(&directory)?;
+        let (key_dir, files_pool) = Self::build_key_dir_map_and_files_pool(&directory)?;
 
         let (lock_file, working_file, working_file_id) = if options.read_write {
             let lock_file = Some(Self::try_acquire_write_lock(directory)?);
@@ -127,6 +131,7 @@ impl Bitcask {
                 working_file_id,
                 key_dir,
                 options,
+                files_pool,
             ),
         };
 
@@ -148,9 +153,12 @@ impl Bitcask {
         Ok(lock_file)
     }
 
-    fn rebuild_key_dir_map(directory: &Path) -> Result<HashMap<Vec<u8>, DirEntry>, anyhow::Error> {
+    fn build_key_dir_map_and_files_pool(
+        directory: &Path,
+    ) -> Result<(HashMap<Vec<u8>, DirEntry>, HashMap<String, File>), anyhow::Error> {
         // TODO: Handle reading from hint files(when added support) if exists, to build the map fast.
         let mut key_dir: HashMap<Vec<u8>, DirEntry> = HashMap::new();
+        let mut files_pool: HashMap<String, File> = HashMap::new();
         let data_files_paths = directory.read_dir()?.filter_map(|entry| {
             entry
                 .ok()
@@ -169,8 +177,15 @@ impl Bitcask {
                 file_path.to_str().unwrap()
             ))?;
             let mut reader = BufReader::with_capacity(64 * 1024, file); // 64 KB
+            let file_name = file_path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap_or_default()
+                .to_string();
 
             loop {
+                // Note: stream_position, does a system call(lseek(fd, 0, SEEK_CUR)) to get the current offset, any better way?
                 let disk_entry_pos: usize = reader.stream_position()?.try_into().unwrap();
                 let disk_entry: Entry =
                     match decode_from_std_read::<Entry, _, _>(&mut reader, config::standard()) {
@@ -183,45 +198,58 @@ impl Bitcask {
                             }
                         }
                     };
-                let file_name = file_path
-                    .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap_or_default()
-                    .to_string();
 
                 match key_dir.get(&disk_entry.key) {
                     Some(val) => {
                         if disk_entry.timestamp > val.timestamp {
                             key_dir.insert(
                                 disk_entry.key,
-                                DirEntry::new(file_name, disk_entry_pos, disk_entry.timestamp),
+                                DirEntry::new(
+                                    file_name.clone(),
+                                    disk_entry_pos,
+                                    disk_entry.timestamp,
+                                ),
                             );
                         }
                     }
                     _ => {
                         key_dir.insert(
                             disk_entry.key,
-                            DirEntry::new(file_name, disk_entry_pos, disk_entry.timestamp),
+                            DirEntry::new(file_name.clone(), disk_entry_pos, disk_entry.timestamp),
                         );
                     }
                 }
             }
+
+            files_pool.insert(file_name, reader.into_inner());
         }
 
-        Ok(key_dir)
+        Ok((key_dir, files_pool))
     }
 
-    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, anyhow::Error> {
+    pub fn get(&mut self, key: &[u8]) -> Result<Vec<u8>, anyhow::Error> {
         let Some(dir_entry) = self.key_dir.get(key) else {
             return Err(anyhow::anyhow!("Key-Value not found"));
         };
 
-        let file_path = self.directory.join(&dir_entry.file_name);
-        let mut data_file = OpenOptions::new()
-            .read(true)
-            .open(&file_path)
-            .context("Failed to open data file containing this Key-Value")?;
+        let mut data_file: &mut File =
+            if dir_entry.file_name == self.working_file.as_ref().unwrap().get_file_name() {
+                self.working_file.as_mut().unwrap().get_mut_file_ref()
+            } else {
+                match self.files_pool.get_mut(&dir_entry.file_name) {
+                    Some(file) => file,
+                    _ => {
+                        let file_path = self.directory.join(&dir_entry.file_name);
+                        let file = OpenOptions::new()
+                            .read(true)
+                            .open(&file_path)
+                            .context("Failed to open data file containing this Key-Value")?;
+                        self.files_pool
+                            .entry(dir_entry.file_name.clone())
+                            .or_insert(file)
+                    }
+                }
+            };
         let _new_pos = data_file.seek(SeekFrom::Start(dir_entry.entry_pos.try_into()?));
 
         let entry: Entry = decode_from_std_read(&mut data_file, config::standard())
