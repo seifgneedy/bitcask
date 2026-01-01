@@ -263,6 +263,7 @@ impl Bitcask {
             self.working_file_id = Some(0);
             WorkingFile::open(&self.directory, 0).unwrap()
         });
+        let wf_bytes_count = wf.bytes_count();
         let entry = Entry::new(key.to_vec(), value.to_vec());
         let bytes_written = wf
             .append(&entry)
@@ -279,7 +280,7 @@ impl Bitcask {
 
         // TODO: when migrating from bincode, we can have the number of bytes to be written before actually write
         // Therefore, we can move the below check before writing and refactor above insertion. To avoid having files > max size.
-        let is_wf_capacity_exceeded = bytes_written + wf.bytes_count() > self.options.max_data_size;
+        let is_wf_capacity_exceeded = bytes_written + wf_bytes_count > self.options.max_data_size;
         if is_wf_capacity_exceeded {
             self.working_file_id = Some(self.working_file_id.unwrap_or_default() + 1);
             self.working_file = Some(WorkingFile::open(
