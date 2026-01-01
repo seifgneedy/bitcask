@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, bail, Result};
 use bincode::{Decode, Encode, config, decode_from_std_read};
 use std::{
     collections::HashMap,
@@ -100,7 +100,7 @@ impl Bitcask {
     pub fn open(
         directory: &Path,
         options: Option<Options>,
-    ) -> Result<BitcaskHandler, anyhow::Error> {
+    ) -> Result<BitcaskHandler> {
         /*
          * Now we have the working file in hand and locking for only one process, What is left in this method?
          * Build the Hashmap from existing data and hint files when opening existing bitcask directory
@@ -138,7 +138,7 @@ impl Bitcask {
         Ok(bitcask_handler)
     }
 
-    fn try_acquire_write_lock(directory: &Path) -> Result<File, anyhow::Error> {
+    fn try_acquire_write_lock(directory: &Path) -> Result<File> {
         let lock_path = directory.join("bitcask.lock");
         let lock_file = OpenOptions::new()
             .read(true)
@@ -155,7 +155,7 @@ impl Bitcask {
 
     fn build_key_dir_map_and_files_pool(
         directory: &Path,
-    ) -> Result<(HashMap<Vec<u8>, DirEntry>, HashMap<String, File>), anyhow::Error> {
+    ) -> Result<(HashMap<Vec<u8>, DirEntry>, HashMap<String, File>)> {
         // TODO: Handle reading from hint files(when added support) if exists, to build the map fast.
         let mut key_dir: HashMap<Vec<u8>, DirEntry> = HashMap::new();
         let mut files_pool: HashMap<String, File> = HashMap::new();
@@ -227,7 +227,7 @@ impl Bitcask {
         Ok((key_dir, files_pool))
     }
 
-    pub fn get(&mut self, key: &[u8]) -> Result<Vec<u8>, anyhow::Error> {
+    pub fn get(&mut self, key: &[u8]) -> Result<Vec<u8>> {
         let Some(dir_entry) = self.key_dir.get(key) else {
             return Err(anyhow::anyhow!("Key-Value not found"));
         };
@@ -258,7 +258,7 @@ impl Bitcask {
         Ok(entry.value)
     }
 
-    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), anyhow::Error> {
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let wf = self.working_file.get_or_insert_with(|| {
             self.working_file_id = Some(0);
             WorkingFile::open(&self.directory, 0).unwrap()
@@ -295,19 +295,19 @@ impl Bitcask {
         todo!()
     }
 
-    pub fn list_keys(&self) -> Result<Vec<Vec<u8>>, anyhow::Error> {
+    pub fn list_keys(&self) -> Result<Vec<Vec<u8>>> {
         Ok(self.key_dir.keys().into_iter().cloned().collect())
     }
 
-    pub fn merge(&self) -> Result<(), anyhow::Error> {
+    pub fn merge(&self) -> Result<()> {
         todo!()
     }
 
-    pub fn sync(&self) -> Result<(), anyhow::Error> {
+    pub fn sync(&self) -> Result<()> {
         todo!()
     }
 
-    pub fn close(&self) -> Result<(), anyhow::Error> {
+    pub fn close(&self) -> Result<()> {
         todo!()
     }
 }
