@@ -1,5 +1,5 @@
-use anyhow::{Context, bail, Result};
-use bincode::{Decode, Encode, config, decode_from_std_read};
+use anyhow::{Context, Result};
+use bincode::{Decode, Encode, config, decode_from_std_read, encode_into_std_write};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
@@ -48,7 +48,7 @@ impl Bitcask {
     }
 }
 
-#[derive(Encode, Decode)]
+#[derive(Clone, Encode, Decode)]
 pub struct DirEntry {
     file_name: String,
     entry_pos: usize,
@@ -71,6 +71,7 @@ pub struct Entry {
     timestamp: u64,
     key: Vec<u8>,
     value: Vec<u8>,
+    is_deleted: bool,
 }
 
 impl Entry {
@@ -84,6 +85,7 @@ impl Entry {
             timestamp: timestamp,
             key: key,
             value: value,
+            is_deleted: false,
         }
     }
 
@@ -94,13 +96,14 @@ impl Entry {
         hasher.update(&value);
         hasher.finalize()
     }
+
+    pub fn mark_deleted(&mut self) {
+        self.is_deleted = true
+    }
 }
 
 impl Bitcask {
-    pub fn open(
-        directory: &Path,
-        options: Option<Options>,
-    ) -> Result<BitcaskHandler> {
+    pub fn open(directory: &Path, options: Option<Options>) -> Result<BitcaskHandler> {
         /*
          * Now we have the working file in hand and locking for only one process, What is left in this method?
          * Build the Hashmap from existing data and hint files when opening existing bitcask directory
@@ -159,23 +162,32 @@ impl Bitcask {
         // TODO: Handle reading from hint files(when added support) if exists, to build the map fast.
         let mut key_dir: HashMap<Vec<u8>, DirEntry> = HashMap::new();
         let mut files_pool: HashMap<String, File> = HashMap::new();
-        let data_files_paths = directory.read_dir()?.filter_map(|entry| {
-            entry
-                .ok()
-                .filter(|e| {
-                    e.file_name()
-                        .to_str()
-                        .unwrap_or_default()
-                        .contains("working_file")
-                })
-                .map(|x| x.path())
+        let mut data_files_paths: Vec<PathBuf> = directory.read_dir()?.filter_map(|entry| {
+            let entry = entry.ok()?;
+            if entry.file_name().to_str()?.contains("working_file") {
+                Some(entry.path())
+            } else {
+                None
+            }
+        }).collect();
+
+        data_files_paths.sort_by_key(|path| {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("working_file_"))
+                .and_then(|id| id.parse::<u64>().ok())
+                .unwrap_or(0)
         });
 
         for file_path in data_files_paths {
-            let file = File::open(&file_path).context(format!(
-                "Error Opening data file with path{}",
-                file_path.to_str().unwrap()
-            ))?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true) // For deletion; will be inserted in files_pool
+                .open(&file_path)
+                .context(format!(
+                    "Error Opening data file with path{}",
+                    file_path.to_str().unwrap()
+                ))?;
             let mut reader = BufReader::with_capacity(64 * 1024, file); // 64 KB
             let file_name = file_path
                 .file_name()
@@ -199,25 +211,16 @@ impl Bitcask {
                         }
                     };
 
-                match key_dir.get(&disk_entry.key) {
-                    Some(val) => {
-                        if disk_entry.timestamp > val.timestamp {
-                            key_dir.insert(
-                                disk_entry.key,
-                                DirEntry::new(
-                                    file_name.clone(),
-                                    disk_entry_pos,
-                                    disk_entry.timestamp,
-                                ),
-                            );
-                        }
+                if disk_entry.is_deleted {
+                    if key_dir.contains_key(&disk_entry.key) {
+                        key_dir.remove(&disk_entry.key);
                     }
-                    _ => {
-                        key_dir.insert(
+                } else {
+                // We don't need to check the timestamp as we sorted the files by id(time) already
+                    key_dir.insert(
                             disk_entry.key,
                             DirEntry::new(file_name.clone(), disk_entry_pos, disk_entry.timestamp),
                         );
-                    }
                 }
             }
 
@@ -228,34 +231,36 @@ impl Bitcask {
     }
 
     pub fn get(&mut self, key: &[u8]) -> Result<Vec<u8>> {
-        let Some(dir_entry) = self.key_dir.get(key) else {
-            return Err(anyhow::anyhow!("Key-Value not found"));
-        };
-
-        let mut data_file: &mut File =
-            if dir_entry.file_name == self.working_file.as_ref().unwrap().get_file_name() {
-                self.working_file.as_mut().unwrap().get_mut_file_ref()
-            } else {
-                match self.files_pool.get_mut(&dir_entry.file_name) {
-                    Some(file) => file,
-                    _ => {
-                        let file_path = self.directory.join(&dir_entry.file_name);
-                        let file = OpenOptions::new()
-                            .read(true)
-                            .open(&file_path)
-                            .context("Failed to open data file containing this Key-Value")?;
-                        self.files_pool
-                            .entry(dir_entry.file_name.clone())
-                            .or_insert(file)
-                    }
-                }
-            };
-        let _new_pos = data_file.seek(SeekFrom::Start(dir_entry.entry_pos.try_into()?));
+        let dir_entry = self
+            .key_dir
+            .get(key)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Key-Value not found"))?;
+        let mut data_file: &mut File = self.get_file_containing_key(dir_entry.file_name)?;
+        data_file.seek(SeekFrom::Start(dir_entry.entry_pos.try_into()?))?;
 
         let entry: Entry = decode_from_std_read(&mut data_file, config::standard())
             .context("Error Decoding Entry from file")?;
 
         Ok(entry.value)
+    }
+
+    fn get_file_containing_key(&mut self, file_name: String) -> Result<&mut File> {
+        if file_name == self.working_file.as_ref().unwrap().get_file_name() {
+            Ok(self.working_file.as_mut().unwrap().get_mut_file_ref())
+        } else {
+            if self.files_pool.contains_key(&file_name) {
+                Ok(self.files_pool.get_mut(&file_name).unwrap())
+            } else {
+                let file_path = self.directory.join(&file_name);
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true) // For deletion
+                    .open(&file_path)
+                    .context("Failed to open data file containing this Key-Value")?;
+                Ok(self.files_pool.entry(file_name).or_insert(file))
+            }
+        }
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -291,9 +296,24 @@ impl Bitcask {
         Ok(())
     }
 
-    pub fn delete(&self, key: &[u8]) -> Result<(), anyhow::Error> {
-        let _ = key;
-        todo!()
+    pub fn delete(&mut self, key: &[u8]) -> Result<()> {
+        let dir_entry = self
+            .key_dir
+            .get(key)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Key-Value not found"))?;
+        let mut data_file = self.get_file_containing_key(dir_entry.file_name)?;
+        data_file.seek(SeekFrom::Start(dir_entry.entry_pos.try_into()?))?;
+
+        let mut entry: Entry = decode_from_std_read(&mut data_file, config::standard())
+            .context("Error Decoding Entry from file")?;
+        entry.mark_deleted();
+
+        // rewrite it as deleted
+        data_file.seek(SeekFrom::Start(dir_entry.entry_pos.try_into()?))?;
+        encode_into_std_write(entry, data_file, config::standard())?;
+        self.key_dir.remove(key);
+        Ok(())
     }
 
     pub fn list_keys(&self) -> Result<Vec<Vec<u8>>> {
