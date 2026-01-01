@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use bincode::{config, encode_into_std_write};
 
 use crate::engine::Entry;
@@ -15,7 +15,7 @@ pub struct WorkingFile {
 }
 
 impl WorkingFile {
-    pub fn open(directory: &Path, id: usize) -> Result<Self, anyhow::Error> {
+    pub fn open(directory: &Path, id: usize) -> Result<Self> {
         // Working file is opened once and when closed, it's considered IMMUTABLE file
         let file_path = directory.join(format!("working_file_{id}"));
         let file = Self {
@@ -31,7 +31,7 @@ impl WorkingFile {
         Ok(file)
     }
 
-    pub fn append(&mut self, entry: &Entry) -> Result<usize, anyhow::Error> {
+    pub fn append(&mut self, entry: &Entry) -> Result<usize> {
         let bytes_written = encode_into_std_write(entry, &mut self.file, config::standard())?;
         self.size_b += bytes_written;
         Ok(bytes_written)
@@ -41,7 +41,7 @@ impl WorkingFile {
         self.size_b
     }
 
-    pub fn get_working_file_id(directory: &Path) -> Result<usize, anyhow::Error> {
+    pub fn get_working_file_id(directory: &Path) -> Result<usize> {
         Ok(
             fs::read_dir(directory)? // TODO: better handle error. create directory if missing?
                 .filter(|entry| {
