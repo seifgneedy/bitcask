@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File, OpenOptions}, io::{Seek, SeekFrom}, path::{Path, PathBuf}
+    fs::{self, File, OpenOptions}, path::{Path, PathBuf}
 };
 
 use anyhow::{Context, Result};
@@ -20,7 +20,7 @@ impl WorkingFile {
         let file = Self {
             file: OpenOptions::new()
                 .read(true)
-                .write(true)
+                .append(true)
                 .create_new(true)
                 .open(&file_path)
                 .context("Couldn't create Working file")?,
@@ -31,7 +31,6 @@ impl WorkingFile {
     }
 
     pub fn append(&mut self, entry: &Entry) -> Result<usize> {
-        self.file.seek(SeekFrom::End(0))?;
         let bytes_written = encode_into_std_write(entry, &mut self.file, config::standard())?;
         self.size_b += bytes_written;
         Ok(bytes_written)
