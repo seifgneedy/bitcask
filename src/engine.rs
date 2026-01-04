@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
-use bincode::{Decode, Encode, config, decode_from_std_read, encode_into_std_write};
+use anyhow::{Context, Result, bail};
+use bincode::{Decode, Encode, config, decode_from_std_read};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
@@ -182,7 +182,6 @@ impl Bitcask {
         for file_path in data_files_paths {
             let file = OpenOptions::new()
                 .read(true)
-                .write(true) // For deletion; will be inserted in files_pool
                 .open(&file_path)
                 .context(format!(
                     "Error Opening data file with path{}",
@@ -212,15 +211,13 @@ impl Bitcask {
                     };
 
                 if disk_entry.is_deleted {
-                    if key_dir.contains_key(&disk_entry.key) {
-                        key_dir.remove(&disk_entry.key);
-                    }
+                    key_dir.remove(&disk_entry.key);
                 } else {
-                // We don't need to check the timestamp as we sorted the files by id(time) already
+                    // We don't need to check the timestamp as we sorted the files by id(time) already
                     key_dir.insert(
-                            disk_entry.key,
-                            DirEntry::new(file_name.clone(), disk_entry_pos, disk_entry.timestamp),
-                        );
+                        disk_entry.key,
+                        DirEntry::new(file_name.clone(), disk_entry_pos, disk_entry.timestamp),
+                    );
                 }
             }
 
@@ -255,7 +252,6 @@ impl Bitcask {
                 let file_path = self.directory.join(&file_name);
                 let file = OpenOptions::new()
                     .read(true)
-                    .write(true) // For deletion
                     .open(&file_path)
                     .context("Failed to open data file containing this Key-Value")?;
                 Ok(self.files_pool.entry(file_name).or_insert(file))
@@ -264,18 +260,23 @@ impl Bitcask {
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        let entry = Entry::new(key.to_vec(), value.to_vec());
+        self.put_entry(entry)?;
+        Ok(())
+    }
+
+    fn put_entry(&mut self, entry: Entry) -> Result<()> {
         let wf = self.working_file.get_or_insert_with(|| {
             self.working_file_id = Some(0);
             WorkingFile::open(&self.directory, 0).unwrap()
         });
         let wf_bytes_count = wf.bytes_count();
-        let entry = Entry::new(key.to_vec(), value.to_vec());
         let bytes_written = wf
             .append(&entry)
             .context("Error Appending to the working file")?;
 
         self.key_dir.insert(
-            key.to_vec(),
+            entry.key,
             DirEntry::new(
                 wf.get_file_name(),
                 wf.bytes_count() - bytes_written,
@@ -297,21 +298,13 @@ impl Bitcask {
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
-        let dir_entry = self
-            .key_dir
-            .get(key)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Key-Value not found"))?;
-        let mut data_file = self.get_file_containing_key(dir_entry.file_name)?;
-        data_file.seek(SeekFrom::Start(dir_entry.entry_pos.try_into()?))?;
-
-        let mut entry: Entry = decode_from_std_read(&mut data_file, config::standard())
-            .context("Error Decoding Entry from file")?;
+        if !self.key_dir.contains_key(key) {
+            bail!("Key-Value not found");
+        }
+        let mut entry= Entry::new(key.to_vec(),vec![b' ']); // tombstone entry
         entry.mark_deleted();
+        self.put_entry(entry)?;
 
-        // rewrite it as deleted
-        data_file.seek(SeekFrom::Start(dir_entry.entry_pos.try_into()?))?;
-        encode_into_std_write(entry, data_file, config::standard())?;
         self.key_dir.remove(key);
         Ok(())
     }
